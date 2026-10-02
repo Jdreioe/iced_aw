@@ -4,11 +4,7 @@
 
 use crate::iced_aw_font::advanced_text::{cancel, down_open, ok, up_open};
 use crate::{
-    core::clock::{
-        HOUR_RADIUS_PERCENTAGE, HOUR_RADIUS_PERCENTAGE_NO_SECONDS, MINUTE_RADIUS_PERCENTAGE,
-        MINUTE_RADIUS_PERCENTAGE_NO_SECONDS, NearestRadius, PERIOD_PERCENTAGE,
-        SECOND_RADIUS_PERCENTAGE,
-    },
+    core::clock::{NearestRadius, Radii},
     core::{clock, overlay::Position, time::Period},
     style::{
         Status,
@@ -47,6 +43,8 @@ const SPACING: Pixels = Pixels(15.0);
 const BUTTON_SPACING: Pixels = Pixels(5.0);
 /// The percentage size of the numbers.
 const NUMBER_SIZE_PERCENTAGE: f32 = 0.15;
+/// The percentage size of the inner hours, 12 to 23, of a 24 hour clock.
+const INNER_NUMBER_SIZE_PERCENTAGE: f32 = 0.12;
 /// The percentage size of the period.
 const PERIOD_SIZE_PERCENTAGE: f32 = 0.2;
 
@@ -148,40 +146,8 @@ where
             let center = clock_bounds.center();
             let radius = clock_bounds.width.min(clock_bounds.height) * 0.5;
 
-            let period_radius = radius * PERIOD_PERCENTAGE;
-
-            let (hour_radius, minute_radius, second_radius) = if self.state.show_seconds {
-                (
-                    radius * HOUR_RADIUS_PERCENTAGE,
-                    radius * MINUTE_RADIUS_PERCENTAGE,
-                    radius * SECOND_RADIUS_PERCENTAGE,
-                )
-            } else {
-                (
-                    radius * HOUR_RADIUS_PERCENTAGE_NO_SECONDS,
-                    radius * MINUTE_RADIUS_PERCENTAGE_NO_SECONDS,
-                    f32::MAX,
-                )
-            };
-
-            let nearest_radius = crate::core::clock::nearest_radius(
-                &if self.state.show_seconds {
-                    vec![
-                        (period_radius, NearestRadius::Period),
-                        (hour_radius, NearestRadius::Hour),
-                        (minute_radius, NearestRadius::Minute),
-                        (second_radius, NearestRadius::Second),
-                    ]
-                } else {
-                    vec![
-                        (period_radius, NearestRadius::Period),
-                        (hour_radius, NearestRadius::Hour),
-                        (minute_radius, NearestRadius::Minute),
-                    ]
-                },
-                cursor.position().unwrap_or_default(),
-                center,
-            );
+            let radii = Radii::new(radius, self.state.use_24h, self.state.show_seconds);
+            let nearest_radius = radii.nearest(cursor.position().unwrap_or_default(), center);
 
             let clock_clicked_status = match event {
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
@@ -201,7 +167,7 @@ where
                             .expect("New time with hour should be valid");
                         event::Status::Captured
                     }
-                    NearestRadius::Hour => {
+                    NearestRadius::Hour | NearestRadius::InnerHour => {
                         self.state.focus = Focus::DigitalHour;
                         self.state.clock_dragged = ClockDragged::Hour;
                         event::Status::Captured
@@ -230,13 +196,22 @@ where
 
             let clock_dragged_status = match self.state.clock_dragged {
                 ClockDragged::Hour => {
+                    let cursor_position = cursor.position().unwrap_or_default();
+                    // A 24 hour clock picks the half of the day by its ring,
+                    // a 12 hour clock keeps the period.
+                    let pm = if self.state.use_24h {
+                        radii.on_inner_hour(cursor_position, center)
+                    } else {
+                        self.state.time.hour12().0
+                    };
+                    let hour_radius = if pm {
+                        radii.inner_hour.unwrap_or(radii.hour)
+                    } else {
+                        radii.hour
+                    };
                     let hour_points = crate::core::clock::circle_points(hour_radius, center, 12);
-                    let nearest_point = crate::core::clock::nearest_point(
-                        &hour_points,
-                        cursor.position().unwrap_or_default(),
-                    );
-
-                    let (pm, _) = self.state.time.hour12();
+                    let nearest_point =
+                        crate::core::clock::nearest_point(&hour_points, cursor_position);
 
                     self.state.time = self
                         .state
@@ -246,8 +221,7 @@ where
                     event::Status::Captured
                 }
                 ClockDragged::Minute => {
-                    let minute_points =
-                        crate::core::clock::circle_points(minute_radius, center, 60);
+                    let minute_points = crate::core::clock::circle_points(radii.minute, center, 60);
                     let nearest_point = crate::core::clock::nearest_point(
                         &minute_points,
                         cursor.position().unwrap_or_default(),
@@ -261,8 +235,11 @@ where
                     event::Status::Captured
                 }
                 ClockDragged::Second => {
-                    let second_points =
-                        crate::core::clock::circle_points(second_radius, center, 60);
+                    let second_points = crate::core::clock::circle_points(
+                        radii.second.unwrap_or(f32::MAX),
+                        center,
+                        60,
+                    );
                     let nearest_point = crate::core::clock::nearest_point(
                         &second_points,
                         cursor.position().unwrap_or_default(),
@@ -1276,53 +1253,32 @@ fn draw_clock<Message, Theme>(
             };
 
             let number_size = radius * NUMBER_SIZE_PERCENTAGE;
+            let inner_number_size = radius * INNER_NUMBER_SIZE_PERCENTAGE;
             let period_size = radius * PERIOD_SIZE_PERCENTAGE;
 
-            let period_radius = radius * PERIOD_PERCENTAGE;
-
-            let (hour_radius, minute_radius, second_radius) = if time_picker.state.show_seconds {
-                (
-                    radius * HOUR_RADIUS_PERCENTAGE,
-                    radius * MINUTE_RADIUS_PERCENTAGE,
-                    radius * SECOND_RADIUS_PERCENTAGE,
-                )
-            } else {
-                (
-                    radius * HOUR_RADIUS_PERCENTAGE_NO_SECONDS,
-                    radius * MINUTE_RADIUS_PERCENTAGE_NO_SECONDS,
-                    f32::MAX,
-                )
-            };
+            let radii = Radii::new(
+                radius,
+                time_picker.state.use_24h,
+                time_picker.state.show_seconds,
+            );
 
             let internal_cursor = cursor.position().unwrap_or_default()
                 - Vector::new(layout.bounds().x, layout.bounds().y);
 
             let nearest_radius = if cursor.is_over(layout.bounds()) {
-                crate::core::clock::nearest_radius(
-                    &if time_picker.state.show_seconds {
-                        vec![
-                            (period_radius, NearestRadius::Period),
-                            (hour_radius, NearestRadius::Hour),
-                            (minute_radius, NearestRadius::Minute),
-                            (second_radius, NearestRadius::Second),
-                        ]
-                    } else {
-                        vec![
-                            (period_radius, NearestRadius::Period),
-                            (hour_radius, NearestRadius::Hour),
-                            (minute_radius, NearestRadius::Minute),
-                        ]
-                    },
-                    internal_cursor,
-                    center,
-                )
+                radii.nearest(internal_cursor, center)
             } else {
                 NearestRadius::None
             };
 
-            let hour_points = crate::core::clock::circle_points(hour_radius, center, 12);
-            let minute_points = crate::core::clock::circle_points(minute_radius, center, 60);
-            let second_points = crate::core::clock::circle_points(second_radius, center, 60);
+            let hour_points = crate::core::clock::circle_points(radii.hour, center, 12);
+            let inner_hour_points = radii
+                .inner_hour
+                .map(|inner_hour| crate::core::clock::circle_points(inner_hour, center, 12))
+                .unwrap_or_default();
+            let minute_points = crate::core::clock::circle_points(radii.minute, center, 60);
+            let second_points =
+                crate::core::clock::circle_points(radii.second.unwrap_or(f32::MAX), center, 60);
 
             let hand_stroke = Stroke {
                 style: canvas::Style::Solid(
@@ -1361,6 +1317,18 @@ fn draw_clock<Message, Theme>(
                             .clock_number_background,
                     );
                 }
+                NearestRadius::InnerHour => {
+                    let nearest_point = inner_hour_points
+                        [crate::core::clock::nearest_point(&inner_hour_points, internal_cursor)];
+
+                    frame.fill(
+                        &Path::circle(nearest_point, 5.0),
+                        style
+                            .get(&StyleState::Hovered)
+                            .expect("Style Sheet not found.")
+                            .clock_number_background,
+                    );
+                }
                 NearestRadius::Minute => {
                     let nearest_point = minute_points
                         [crate::core::clock::nearest_point(&minute_points, internal_cursor)];
@@ -1388,71 +1356,80 @@ fn draw_clock<Message, Theme>(
                 NearestRadius::None => {}
             }
 
-            let period_text = CanvasText {
-                content: format!("{period}"),
-                position: center,
-                color: style
-                    .get(&clock_style_state)
-                    .expect("Style Sheet not found.")
-                    .clock_number_color,
-                size: Pixels(period_size),
-                font: renderer.default_font(),
-                align_x: text::Alignment::Center,
-                align_y: Vertical::Center,
-                line_height: text::LineHeight::Relative(1.3),
-                shaping: text::Shaping::Basic,
-                max_width: f32::INFINITY,
-            };
-            frame.fill_text(period_text);
-
-            hour_points.iter().enumerate().for_each(|(i, p)| {
-                let (pm, selected) = {
-                    let (pm, _) = time_picker.state.time.hour12();
-                    let hour = time_picker.state.time.hour();
-                    (pm, hour % 12 == i as u32)
-                };
-
-                let mut style_state = StyleState::Active;
-                if selected {
-                    frame.stroke(&Path::line(center, *p), hand_stroke);
-                    frame.fill(
-                        &Path::circle(*p, number_size * 0.8),
-                        style
-                            .get(&StyleState::Selected)
-                            .expect("Style Sheet not found.")
-                            .clock_number_background,
-                    );
-                    style_state = style_state.max(StyleState::Selected);
-                }
-
-                let text = CanvasText {
-                    content: format!(
-                        "{}",
-                        if pm && time_picker.state.use_24h {
-                            i + 12
-                        } else if !time_picker.state.use_24h && i == 0 {
-                            12
-                        } else {
-                            i
-                        }
-                    ),
-                    position: *p,
+            if !time_picker.state.use_24h {
+                let period_text = CanvasText {
+                    content: format!("{period}"),
+                    position: center,
                     color: style
-                        .get(&style_state)
+                        .get(&clock_style_state)
                         .expect("Style Sheet not found.")
                         .clock_number_color,
-                    size: Pixels(number_size),
+                    size: Pixels(period_size),
                     font: renderer.default_font(),
                     align_x: text::Alignment::Center,
                     align_y: Vertical::Center,
-                    shaping: text::Shaping::Basic,
                     line_height: text::LineHeight::Relative(1.3),
+                    shaping: text::Shaping::Basic,
                     max_width: f32::INFINITY,
                 };
+                frame.fill_text(period_text);
+            }
 
-                frame.fill_text(text);
-            });
+            // A 12 hour clock shows one ring of hours for its period. A 24 hour
+            // clock shows 0 to 11 on the outer ring and 12 to 23 inside it.
+            let hour = time_picker.state.time.hour();
+            let mut hour_rings = vec![(&hour_points, 0, number_size)];
+            if time_picker.state.use_24h {
+                hour_rings.push((&inner_hour_points, 12, inner_number_size));
+            }
+            for (points, offset, size) in hour_rings {
+                points.iter().enumerate().for_each(|(i, p)| {
+                    let i = i as u32;
+                    let selected = if time_picker.state.use_24h {
+                        hour == i + offset
+                    } else {
+                        hour % 12 == i
+                    };
 
+                    let mut style_state = StyleState::Active;
+                    if selected {
+                        frame.stroke(&Path::line(center, *p), hand_stroke);
+                        frame.fill(
+                            &Path::circle(*p, size * 0.8),
+                            style
+                                .get(&StyleState::Selected)
+                                .expect("Style Sheet not found.")
+                                .clock_number_background,
+                        );
+                        style_state = style_state.max(StyleState::Selected);
+                    }
+
+                    let label = if time_picker.state.use_24h {
+                        i + offset
+                    } else if i == 0 {
+                        12
+                    } else {
+                        i
+                    };
+                    let text = CanvasText {
+                        content: format!("{label}"),
+                        position: *p,
+                        color: style
+                            .get(&style_state)
+                            .expect("Style Sheet not found.")
+                            .clock_number_color,
+                        size: Pixels(size),
+                        font: renderer.default_font(),
+                        align_x: text::Alignment::Center,
+                        align_y: Vertical::Center,
+                        shaping: text::Shaping::Basic,
+                        line_height: text::LineHeight::Relative(1.3),
+                        max_width: f32::INFINITY,
+                    };
+
+                    frame.fill_text(text);
+                });
+            }
             minute_points.iter().enumerate().for_each(|(i, p)| {
                 let selected = time_picker.state.time.minute() == i as u32;
 

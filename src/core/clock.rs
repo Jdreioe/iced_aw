@@ -54,10 +54,109 @@ pub enum NearestRadius {
     Period,
     /// Hour is the nearest radius to the cursor position.
     Hour,
+    /// The inner ring of hours, 12 to 23, of a 24 hour clock is the nearest
+    /// radius to the cursor position.
+    InnerHour,
     /// Minute is the nearest radius to the cursor position.
     Minute,
     /// Second is the nearest radius to the cursor position.
     Second,
+}
+
+/// The radii of a 24 hour clock: the hours 0 to 11 on one ring and 12 to 23 on
+/// a ring inside it, instead of a period to switch between them.
+const HOUR_RADIUS_PERCENTAGE_24H: f32 = 0.64;
+const INNER_HOUR_RADIUS_PERCENTAGE_24H: f32 = 0.4;
+const HOUR_RADIUS_PERCENTAGE_24H_SECONDS: f32 = 0.48;
+const INNER_HOUR_RADIUS_PERCENTAGE_24H_SECONDS: f32 = 0.3;
+const MINUTE_RADIUS_PERCENTAGE_24H_SECONDS: f32 = 0.69;
+
+/// The rings of a clock with the given radius, by what it shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Radii {
+    /// The period in the center, on a 12 hour clock only.
+    pub period: Option<f32>,
+    /// The hours, 0 to 11 on a 24 hour clock.
+    pub hour: f32,
+    /// The hours 12 to 23, on a 24 hour clock only.
+    pub inner_hour: Option<f32>,
+    /// The minutes.
+    pub minute: f32,
+    /// The seconds, when they are shown.
+    pub second: Option<f32>,
+}
+
+impl Radii {
+    /// The rings of a clock with the given radius.
+    #[must_use]
+    pub fn new(radius: f32, use_24h: bool, show_seconds: bool) -> Self {
+        let (period, hour, inner_hour, minute, second) = match (use_24h, show_seconds) {
+            (false, false) => (
+                Some(PERIOD_PERCENTAGE),
+                HOUR_RADIUS_PERCENTAGE_NO_SECONDS,
+                None,
+                MINUTE_RADIUS_PERCENTAGE_NO_SECONDS,
+                None,
+            ),
+            (false, true) => (
+                Some(PERIOD_PERCENTAGE),
+                HOUR_RADIUS_PERCENTAGE,
+                None,
+                MINUTE_RADIUS_PERCENTAGE,
+                Some(SECOND_RADIUS_PERCENTAGE),
+            ),
+            (true, false) => (
+                None,
+                HOUR_RADIUS_PERCENTAGE_24H,
+                Some(INNER_HOUR_RADIUS_PERCENTAGE_24H),
+                MINUTE_RADIUS_PERCENTAGE_NO_SECONDS,
+                None,
+            ),
+            (true, true) => (
+                None,
+                HOUR_RADIUS_PERCENTAGE_24H_SECONDS,
+                Some(INNER_HOUR_RADIUS_PERCENTAGE_24H_SECONDS),
+                MINUTE_RADIUS_PERCENTAGE_24H_SECONDS,
+                Some(SECOND_RADIUS_PERCENTAGE),
+            ),
+        };
+        Self {
+            period: period.map(|p| p * radius),
+            hour: hour * radius,
+            inner_hour: inner_hour.map(|p| p * radius),
+            minute: minute * radius,
+            second: second.map(|p| p * radius),
+        }
+    }
+
+    /// The ring nearest to the cursor position.
+    #[must_use]
+    pub fn nearest(&self, cursor_position: Point, center: Point) -> NearestRadius {
+        let mut radii = vec![
+            (self.hour, NearestRadius::Hour),
+            (self.minute, NearestRadius::Minute),
+        ];
+        if let Some(period) = self.period {
+            radii.push((period, NearestRadius::Period));
+        }
+        if let Some(inner_hour) = self.inner_hour {
+            radii.push((inner_hour, NearestRadius::InnerHour));
+        }
+        if let Some(second) = self.second {
+            radii.push((second, NearestRadius::Second));
+        }
+        nearest_radius(&radii, cursor_position, center)
+    }
+
+    /// Whether the cursor position is nearer the inner ring of hours than the
+    /// outer one. Always false on a 12 hour clock.
+    #[must_use]
+    pub fn on_inner_hour(&self, cursor_position: Point, center: Point) -> bool {
+        self.inner_hour.is_some_and(|inner_hour| {
+            let distance = cursor_position.distance(center);
+            (inner_hour - distance).abs() < (self.hour - distance).abs()
+        })
+    }
 }
 
 /// Distributes the amount of points on a circle with the given radius around the
@@ -350,6 +449,35 @@ mod tests {
             let distance = point.distance(center);
             assert!((distance - 10.0).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn a_24_hour_clock_has_an_inner_ring_of_hours_and_no_period() {
+        use super::Radii;
+        let center = Point::new(100.0, 100.0);
+        let radii = Radii::new(100.0, true, false);
+        assert_eq!(radii.period, None);
+        assert_eq!(
+            radii.nearest(Point::new(100.0, 60.0), center),
+            NearestRadius::InnerHour
+        );
+        assert_eq!(
+            radii.nearest(Point::new(100.0, 36.0), center),
+            NearestRadius::Hour
+        );
+        assert_eq!(
+            radii.nearest(Point::new(100.0, 10.0), center),
+            NearestRadius::Minute
+        );
+        // The center is nearest the inner hours, not a period.
+        assert_eq!(radii.nearest(center, center), NearestRadius::InnerHour);
+        assert!(radii.on_inner_hour(Point::new(100.0, 60.0), center));
+        assert!(!radii.on_inner_hour(Point::new(100.0, 36.0), center));
+
+        let radii = Radii::new(100.0, false, false);
+        assert_eq!(radii.inner_hour, None);
+        assert_eq!(radii.nearest(center, center), NearestRadius::Period);
+        assert!(!radii.on_inner_hour(Point::new(100.0, 60.0), center));
     }
 
     #[test]
